@@ -73,34 +73,28 @@ def get_heap_tuple_header(item_data):
             #'t_infomask':t_infomask,
             't_hoff':t_hoff}
 
-def get_page_data(page_data):
-    header = get_header_data(page_data)
-    item_id_list = get_item_pointer(page_data, header)
-
-    return header, item_id_list
-
 
 def get_table_column_info(table_name):
     query = f"""
         SELECT
-        a.attname AS column_name,
-        t.typname AS data_type,
-        a.attlen AS length,
-        CASE
-            WHEN a.attnotnull THEN 'NO'
-            ELSE 'YES'
-        END AS is_nullable
-    FROM
-        pg_class c
-    JOIN
-        pg_attribute a ON c.oid = a.attrelid
-    JOIN
-        pg_type t ON a.atttypid = t.oid
-    WHERE
-        c.relname = '{table_name}'
-        AND a.attnum > 0
-        AND NOT a.attisdropped;
-    """
+            a.attname AS column_name,
+            t.typname AS data_type,
+            a.attlen AS length,
+            CASE
+                WHEN a.attnotnull THEN 'NO'
+                ELSE 'YES'
+            END AS is_nullable
+        FROM
+            pg_class c
+        JOIN
+            pg_attribute a ON c.oid = a.attrelid
+        JOIN
+            pg_type t ON a.atttypid = t.oid
+        WHERE
+            c.relname = '{table_name}'
+            AND a.attnum > 0
+            AND NOT a.attisdropped;
+        """
 
     return db.select(query)
 
@@ -120,16 +114,23 @@ def extract_data_from_item(item):
         col_type = col[1]
         size = col[2]
         try:
-
             if size == -1: # 가변 길이
-                length = b_data[offset]>>1
-                value = b_data[offset+1:offset+length].decode()
+                flag = b_data[offset]&0x01
+                if flag == 0:
+                    length = (struct.unpack_from("<I", b_data,offset)[0] >> 2) - 4
+                    offset += 4
+                else:
+                    length = (b_data[offset]>>1) - 1
+                    offset +=1
+                    
+                value = b_data[offset:offset+length].decode()
                 offset += length
             else:
-                remain_space_for_padding = 8 - (offset - (offset//8)*8)
+                #remain_space_for_padding = 8 - (offset - (offset//8)*8)
+                length = size
+                remain_space_for_padding = size - (offset - (offset//size)*size)
                 if remain_space_for_padding < size:
                     offset += remain_space_for_padding
-
 
                 if size == 4:
                     value, offset = struct.unpack_from("I", b_data, offset)[0], offset+4
@@ -138,8 +139,10 @@ def extract_data_from_item(item):
                     if col_type == 'timestamp':
                         value= datetime(2000, 1, 1,tzinfo=timezone.utc) + timedelta(microseconds = value)
         except Exception as e:
+            print("Row Data: ", row_data)
             print("Column Info : ", name, col_type, size)
             print(f"binary : \n{b_data}\n")
+            print(f"Failed Data: \n{b_data[offset:offset+length]}")
             raise e
 
         row_data[name] = value
@@ -150,19 +153,34 @@ def get_page_data(page_data):
     header = get_header_data(page_data)
     item_id_list = get_item_pointer(page_data, header)
 
+    global page_index
 
+    print(f"[{page_index}] Checksum : {header['pd_checksum']}\tLower : {header['pd_lower']}\tUpper : {header['pd_upper']}\tDataCounts : {len(item_id_list)}")
     item_data = []
-    for item_idx in item_id_list:
+    for idx, item_idx in enumerate(item_id_list):
         if item_idx[2] != 1:
-            print(f"[{item_idx}] Is not valid")
+            if item_idx[2] == 2:
+                print(f"\t[Item {idx} : {item_idx}] Is Redirected")
+            else:
+                #print(f"\t[Item {idx} : {item_idx}] Is not valid")
+                pass
             continue
         item_raw_data = page_data[item_idx[0]:item_idx[0] + item_idx[1]]
         try:
             extracted_item_data = extract_data_from_item(item_raw_data)
         except Exception as e:
-            print("item_index : ", item_idx)
+            print(f"item_index[{idx}] : ", item_idx)
             raise e
         item_data.append(extracted_item_data)
+
+    if len(item_data) > 0:
+        min_index = min([d['index'] for d in item_data])
+        max_index = max([d['index'] for d in item_data])
+        print(f"\t\tIndex : {min_index} ~ {max_index}")
+    else:
+        print("\t\tEmpty Page")
+
+
 
     return item_data
 
@@ -173,17 +191,22 @@ if __name__ == '__main__':
     table_name= 'photo_info'
     table_column_info = get_table_column_info(table_name)
     sample_page_number = 0
-    file_path = './25137'
+    file_path = './25137_new'
     with open(file_path, 'rb') as f:
         data = f.read()
 
-    print("Data Length :", len(data))
     pages = int(len(data) / PAGE_SIZE)
+
+    print("Data Length :", len(data))
     print("Exist Pages :", pages)
 
+    print("-"*20, "Start", "-"*20)
 
     total_data = []
     for page_index in range(pages):
+        if page_index != 8:
+            #continue
+            pass
         page_raw_data = data[page_index*PAGE_SIZE: (page_index+1) * PAGE_SIZE]
         try:
             page_data = get_page_data(page_raw_data)
@@ -194,10 +217,8 @@ if __name__ == '__main__':
 
 
     pd = pd.DataFrame(total_data)
-    pd.to_csv('parsed_data.csv')
+    pd.to_csv('result_data.csv')
 
     end_time = time.time()
     print("Elapsed Time: ", end_time - start_time)
-
-
 
